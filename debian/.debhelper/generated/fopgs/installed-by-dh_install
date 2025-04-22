@@ -1,0 +1,8 @@
+./usr/bin/fopgs
+./usr/lib/fopgs/scripts/backup.service
+./usr/lib/fopgs/scripts/backup.sh
+./usr/lib/fopgs/scripts/backup.timer
+./usr/lib/fopgs/scripts/libfunction
+./usr/lib/fopgs/scripts/openssl-easyrsa.cnf
+./usr/lib/fopgs/scripts/server.conf
+./usr/lib/fopgs/scripts/vars

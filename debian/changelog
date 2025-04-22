@@ -1,0 +1,9 @@
+fopgs (0.1.1) UNRELEASED; urgency=medium
+
+  * [Fix] Fixed name of script to install openvpn
+
+fopgs (0.1) UNRELEASED; urgency=medium
+
+  * Initial Release.
+
+ -- home <home@unknown>  Wed, 26 Mar 2025 13:23:13 +0300

@@ -1,0 +1,454 @@
+#!/bin/bash
+#set -x
+
+#color for text
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+#Check if the script is run as root
+if [ "$(id -u)" -ne 0 ]; then
+    echo -e "${RED}Error: This script must be run as root.${NC}"
+    exit 1
+fi
+#Join function library
+if [ -f /usr/lib/fopgs/scripts/libfunction ]; then
+    source /usr/lib/fopgs/scripts/libfunction
+else
+    echo -e "${RED}Error: Library file not found.${NC}"
+    exit 1
+fi
+#=====================Apply iptables rules========================
+function_iptables
+#=====================Create ssh certificate========================
+#This function creates a SSH certificate for the serveruser
+if [ ! -f /home/serveruser/.ssh/servkey ]; then
+    echo -e "${GREEN}Creating SSH certificate for serveruser.${NC}"
+    function_sshsetup
+else
+    echo -e "${GREEN}SSH certificate already exists.${NC}"
+fi
+#=====================Install OpenVPN========================
+if systemctl is-active --quiet openvpn@server.service; then
+    echo -e "${GREEN}OpenVPN server is already running.${NC}"
+else
+    echo -e "${RED}OpenVPN server is not running or not installed.${NC}"
+    echo "${GREEN}Starting OpenVPN server installation.${NC}"
+    # Call the function to install OpenVPN
+    function_ovpnisntall
+fi
+#=====================Create ssh certificate========================
+#Variables ssh
+SSH_USER=""
+PASSWORD=""
+SSH_KEY="/home/serveruser/.ssh/servkey"
+SERVER_IP=""
+SSH_PORT=""
+#Installation options selection menu
+echo -e  "Enter the number of point.\n1)Install OpenVPN, Samba, Prometheus to single server;
+	\r2)Install OpenVPN, Samba to single server, Prometheus install to another server;
+	\r3)Install OpenVPN to single server, Samba and Prometheus install to another servers.
+	\r4)Create VPS server(BETA. Using timeweb.cloud).
+    \r5)Create client config VPN user."
+read -p "Enter your choice [1-5]: " CHOICE
+while true; do
+    case $CHOICE in
+        1)
+            echo -e "${GREEN}Starting install OpenVPN, Samba, Prometheus to single server.${NC}"
+            # Call the functions to install OpenVPN, Samba, and Prometheus on a single server
+            function_samba_install
+            function_prometheus_install
+            function_prometheus_ne_install
+            function_grafana_install
+            function_backup_service
+            break
+            ;;
+        2)
+            echo -e "${GREEN}Starting install OpenVPN, Samba to single server, Prometheus install to another server.${NC}"
+            # Call the function to install OpenVPN and Samba on a single server, and Prometheus on another server
+            echo -e "Choise option:\n\r1)Join to the server with password and setup SSH certificate;
+                \r2)Join to server with SSH certificate."
+            read -p "Enter your choice [1-2]: " CHOICE_P2
+            case $CHOICE_P2 in
+                1)
+                    echo -e "${GREEN}Join to the server with password and setup SSH certificate.${NC}"
+                    # Call the function to join the server with password and setup SSH certificate
+                    read -p "Enter the server IP: " SERVER_IP
+                    read -p "Enter the SSH port: " SSH_PORT
+                    read -p "Enter the SSH user(default: serveruser): " SSH_USER #default serveruser
+                    read -p "Enter the SSH password: " PASSWORD
+                    if [ -z "$SERVER_IP" ]; then
+                        echo -e "${RED}Error: Server IP is required.${NC}"
+                        exit 1
+                    elif [ -z "$SSH_PORT" ]; then
+                        echo -e "${RED}Error: SSH port is required.${NC}"
+                        exit 1
+                    elif [ -z "$SSH_USER" ]; then
+                        SSH_USER="serveruser" 
+                        echo -e "${GREEN}Using default SSH user: $SSH_USER.${NC}"
+                    elif [ -z "$PASSWORD" ]; then
+                        echo -e "${RED}Error: SSH password is required.${NC}"
+                        exit 1
+                    fi
+                    #Install OpenVPN, Samba, and node-exporter on main server
+                    function_create_vpnclient mserver
+                    #Check the samba service
+                    if systemctl is-active --quiet smbd.service; then
+                        echo -e "${GREEN}Samba service is already running.${NC}"
+                    else
+                        echo -e "${RED}Samba service is not running or not installed.${NC}"
+                        echo "${GREEN}Starting Samba service installation.${NC}"
+                        function_samba_install
+                    fi
+                    #Check the backup service
+                    if systemctl is-active --quiet backup.timer; then
+                        echo -e "${GREEN}Backup service is already running.${NC}"
+                    else
+                        echo -e "${RED}Backup service is not running or not installed.${NC}"
+                        echo "${GREEN}Starting Backup service installation.${NC}"
+                        function_backup_service
+                    fi
+                    #Check the node-exporter service
+                    if systemctl is-active --quiet status node_exporter.service; then
+                        echo -e "${GREEN}Node Exporter service is already running.${NC}"
+                    else
+                        echo -e "${RED}Node Exporter service is not running or not installed.${NC}"
+                        echo "${GREEN}Starting Node Exporter service installation.${NC}"
+                        function_prometheus_ne_install
+                    fi
+                    #Connect and install prometheus and Grafana on another server
+                    sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                    if function_check_ssh_connection "$SERVER_IP" "$SSH_PORT" "$SSH_KEY" "$SSH_USER" "$PASSWORD"; then
+                        echo -e "${GREEN}SSH connection successful.${NC}"
+                        sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                        sudo sshpass -p "$PASSWORD" rsync -avz /usr/lib/fopgs/ $SSH_USER@$SERVER_IP:"/usr/lib/fopgs/"
+                        sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                        sudo sshpass -p "$PASSWORD" ssh -v $SSH_USER@$SERVER_IP -p $SSH_PORT "\
+                        source /usr/lib/fopgs/scripts/libfunction;\
+                        function_iptables;\
+                        function_ssh_addkey;\
+                        function_iptables;\
+                        function_ovpn_connection mserver;\
+                        function_prometheus_install;\
+                        function_prometheus_ne_install;\
+                        function_grafana_install;\
+                        function_backup_service" > /var/log/fopgs.log
+                    else
+                        echo -e "${RED}Error: SSH connection failed.${NC}"
+                        exit 1
+                    fi
+                    break
+                    ;;
+                2)
+                    echo -e "${GREEN}Join to the server with password and setup SSH certificate.${NC}"
+                    # Call the function to join the server with password and setup SSH certificate
+                    read -p "Enter the server IP: " SERVER_IP
+                    read -p "Enter the SSH port: " SSH_PORT
+                    read -p "Enter the SSH user(default: serveruser): " SSH_USER #default serveruser
+                    read -p "Enter the SSH key with dir: " SSH_KEY
+                    if [ -z "$SERVER_IP" ]; then
+                        echo -e "${RED}Error: Server IP is required.${NC}"
+                        exit 1
+                    elif [ -z "$SSH_PORT" ]; then
+                        echo -e "${RED}Error: SSH port is required.${NC}"
+                        exit 1
+                    elif [ -z "$SSH_USER" ]; then
+                        SSH_USER="serveruser" 
+                        echo -e "${GREEN}Using default SSH user: $SSH_USER.${NC}"
+                    elif [ -z "$SSH_KEY" ]; then
+                        echo -e "${RED}Error: SSH SSH_KEY is required.${NC}"
+                        exit 1
+                    fi
+                    #Install OpenVPN, Samba, and node-exporter on main server
+                    function_create_vpnclient mserver
+                    #Check the samba service
+                    if systemctl is-active --quiet smbd.service; then
+                        echo -e "${GREEN}Samba service is already running.${NC}"
+                    else
+                        echo -e "${RED}Samba service is not running or not installed.${NC}"
+                        echo "${GREEN}Starting Samba service installation.${NC}"
+                        function_samba_install
+                    fi
+                    #Check the backup service
+                    if systemctl is-active --quiet backup.timer; then
+                        echo -e "${GREEN}Backup service is already running.${NC}"
+                    else
+                        echo -e "${RED}Backup service is not running or not installed.${NC}"
+                        echo "${GREEN}Starting Backup service installation.${NC}"
+                        function_backup_service
+                    fi
+                    #Check the node-exporter service
+                    if systemctl is-active --quiet status node_exporter.service; then
+                        echo -e "${GREEN}Node Exporter service is already running.${NC}"
+                    else
+                        echo -e "${RED}Node Exporter service is not running or not installed.${NC}"
+                        echo "${GREEN}Starting Node Exporter service installation.${NC}"
+                        function_prometheus_ne_install
+                    fi
+                    #Connect and install prometheus and Grafana on another server
+                    sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                    if function_check_ssh_connection "$SERVER_IP" "$SSH_PORT" "$SSH_KEY" "$SSH_USER" "$PASSWORD"; then
+                        echo -e "${GREEN}SSH connection successful.${NC}"
+                        sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                        sudo rsync -avz -e "ssh -i $SSH_KEY" /usr/lib/fopgs/ $SSH_USER@$SERVER_IP:"/usr/lib/fopgs/"
+                        sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                        sudo ssh -i "$SSH_KEY" -v $SSH_USER@$SERVER_IP -p $SSH_PORT "\
+                        source /usr/lib/fopgs/scripts/libfunction;\
+                        function_iptables;\
+                        function_ssh_addkey;\
+                        function_iptables;\
+                        function_ovpn_connection mserver;\
+                        function_prometheus_install;\
+                        function_prometheus_ne_install;\
+                        function_grafana_install;\
+                        function_backup_service" > /var/log/fopgs.log
+                    else
+                        echo -e "${RED}Error: SSH connection failed.${NC}"
+                        exit 1
+                    fi
+                    break
+                    ;;
+                *)
+                    echo -e "${RED}Invalid choice. Please enter a number between 1 and 2.${NC}"
+                    read -p "Enter your choice [1-2]: " CHOICE_P2
+            esac
+            break
+            ;;
+        3) 
+            echo -e "${GREEN}Starting install OpenVPN to single server, Samba and Prometheus install to another servers.${NC}"
+            # Call the function to install OpenVPN on a single server, and Samba and Prometheus on another servers
+            echo -e "Choise option:\n\r1)Join to server with SSH certificate;
+                \r2)Join to the server with password and setup SSH certificate."
+            read -p "Enter your choice [1-2]: " CHOICE_P2
+            case $CHOICE_P2 in
+                1)
+                    echo -e "${GREEN}Join to the server with password and setup SSH certificate.${NC}"
+                    # Call the function to join the server with password and setup SSH certificate
+                    echo "Please enter the server details:"
+                    read -p "Enter the server IP: " SERVER_IP
+                    read -p "Enter the SSH port: " SSH_PORT
+                    read -p "Enter the SSH user(default: serveruser): " SSH_USER #default serveruser
+                    read -p "Enter the full dir ssh key : " SSH_KEY
+                    if [ -z "$SERVER_IP" ]; then
+                        echo -e "${RED}Error: Server IP is required.${NC}"
+                        exit 1
+                    elif [ -z "$SSH_PORT" ]; then
+                        echo -e "${RED}Error: SSH port is required.${NC}"
+                        exit 1
+                    elif [ -z "$SSH_USER" ]; then
+                        SSH_USER="serveruser" 
+                        echo -e "${GREEN}Using default SSH user: $SSH_USER.${NC}"
+                    elif [ ! -f "$SSH_KEY" ]; then
+                        echo -e "${RED}Error: SSH key does not exist.${NC}"
+                        exit 1
+                    fi
+                    #Install OpenVPN, Samba, and node-exporter on main server
+                    #Check the backup service
+                    if systemctl is-active --quiet backup.timer; then
+                        echo -e "${GREEN}Backup service is already running.${NC}"
+                    else
+                        echo -e "${RED}Backup service is not running or not installed.${NC}"
+                        echo "${GREEN}Starting Backup service installation.${NC}"
+                        function_backup_service
+                    fi
+                    #Check the node-exporter service
+                    if systemctl is-active --quiet status node_exporter.service; then
+                        echo -e "${GREEN}Node Exporter service is already running.${NC}"
+                    else
+                        echo -e "${RED}Node Exporter service is not running or not installed.${NC}"
+                        echo "${GREEN}Starting Node Exporter service installation.${NC}"
+                        function_prometheus_ne_install
+                    fi
+                    echo "Choose type of installation:"
+                    echo -e "1)Install Samba and node-exporter;
+                    \r2)Install Prometheus and Grafana."
+                    read -p "Enter your choice [1-2]: " CHOICE_P3
+                    case $CHOICE_P3 in
+                        1)
+                            echo -e "${GREEN}Starting install Samba and node-exporter.${NC}"
+                            # Call the function to install Samba and node-exporter
+                            echo "Create config for openvpn client."
+                            function_create_vpnclient sserver
+                            sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                            if function_check_ssh_connection "$SERVER_IP" "$SSH_PORT" "$SSH_KEY" "$SSH_USER" "$PASSWORD"; then
+                                echo -e "${GREEN}SSH connection successful.${NC}"
+                                sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                                sudo rsync -avz -e "ssh -i $SSH_KEY" /usr/lib/fopgs/ $SSH_USER@$SERVER_IP:"/usr/lib/fopgs/"
+                                sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                                sudo ssh -i "$SSH_KEY" -v $SSH_USER@$SERVER_IP -p $SSH_PORT "\
+                                source /usr/lib/fopgs/scripts/libfunction;\
+                                function_iptables;\
+                                function_ssh_addkey;\
+                                function_iptables;\
+                                function_ovpn_connection "sserver";\
+                                function_samba_install;\
+                                function_backup_service" > /var/log/fopgs_smb.log
+                            else
+                                echo -e "${RED}Error: SSH connection failed.${NC}"
+                                exit 1
+                            fi                            
+                            break
+                            ;;
+                        2)
+                            echo -e "${GREEN}Starting install Prometheus and Grafana.${NC}"
+                            # Call the function to install Prometheus and Grafana
+                            function_create_vpnclient mserver
+                            sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                            if function_check_ssh_connection "$SERVER_IP" "$SSH_PORT" "$SSH_KEY" "$SSH_USER" "$PASSWORD"; then
+                                echo -e "${GREEN}SSH connection successful.${NC}"
+                                sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                                sudo rsync -avz -e "ssh -i $SSH_KEY" /usr/lib/fopgs/ $SSH_USER@$SERVER_IP:"/usr/lib/fopgs/"
+                                sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                                sudo ssh -i "$SSH_KEY" -v $SSH_USER@$SERVER_IP -p $SSH_PORT "\
+                                source /usr/lib/fopgs/scripts/libfunction;\
+                                function_iptables;\
+                                function_ssh_addkey;\
+                                function_iptables;\
+                                function_ovpn_connection "mserver";\
+                                function_prometheus_install;\
+                                function_prometheus_ne_install;\
+                                function_grafana_install;\
+                                function_backup_service" > /var/log/fopgs_prom.log
+                            else
+                                echo -e "${RED}Error: SSH connection failed.${NC}"
+                                exit 1
+                            fi
+                            break
+                            ;;
+                        *)
+                            echo -e "${RED}Invalid choice. Please enter a number between 1 and 2.${NC}"
+                            ;;
+                    esac
+
+                    break
+                    ;;
+                2)
+                    echo -e "${GREEN}Join to the server with password and setup SSH certificate.${NC}"
+                    # Call the function to join the server with password and setup SSH certificate
+                    echo "Please enter the server details:"
+                    read -p "Enter the server IP: " SERVER_IP
+                    read -p "Enter the SSH port: " SSH_PORT
+                    read -p "Enter the SSH user(default: serveruser): " SSH_USER #default serveruser
+                    read -p "Enter the password: " PASSWORD
+                    if [ -z "$SERVER_IP" ]; then
+                        echo -e "${RED}Error: Server IP is required.${NC}"
+                        exit 1
+                    elif [ -z "$SSH_PORT" ]; then
+                        echo -e "${RED}Error: SSH port is required.${NC}"
+                        exit 1
+                    elif [ -z "$SSH_USER" ]; then
+                        SSH_USER="serveruser" 
+                        echo -e "${GREEN}Using default SSH user: $SSH_USER.${NC}"
+                    elif [ -z "$PASSWORD" ]; then
+                        echo -e "${RED}Error: SSH password is required.${NC}"
+                        exit 1
+                    fi
+                    #Install OpenVPN, Samba, and node-exporter on main server
+                    #Check the backup service
+                    if systemctl is-active --quiet backup.timer; then
+                        echo -e "${GREEN}Backup service is already running.${NC}"
+                    else
+                        echo -e "${RED}Backup service is not running or not installed.${NC}"
+                        echo "${GREEN}Starting Backup service installation.${NC}"
+                        function_backup_service
+                    fi
+                    #Check the node-exporter service
+                    if systemctl is-active --quiet status node_exporter.service; then
+                        echo -e "${GREEN}Node Exporter service is already running.${NC}"
+                    else
+                        echo -e "${RED}Node Exporter service is not running or not installed.${NC}"
+                        echo "${GREEN}Starting Node Exporter service installation.${NC}"
+                        function_prometheus_ne_install
+                    fi
+                    echo "Choose type of installation:"
+                    echo -e "1)Install Samba and node-exporter;
+                    \r2)Install Prometheus and Grafana."
+                    read -p "Enter your choice [1-2]: " CHOICE_P2
+                    case $CHOICE_P3 in
+                        1)
+                            echo -e "${GREEN}Starting install Samba and node-exporter.${NC}"
+                            # Call the function to install Samba and node-exporter
+                            echo "Create config for openvpn client."
+                            function_create_vpnclient sserver
+                            sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                            if function_check_ssh_connection "$SERVER_IP" "$SSH_PORT" "$SSH_KEY" "$SSH_USER" "$PASSWORD"; then
+                                echo -e "${GREEN}SSH connection successful.${NC}"
+                                sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                                sudo sshpass -p $PASSWORD rsync -avz /usr/lib/fopgs/ $SSH_USER@$SERVER_IP:"/usr/lib/fopgs/"
+                                sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                                sudo sshpassh -p $PASSWORD ssh -v $SSH_USER@$SERVER_IP -p $SSH_PORT "\
+                                source /usr/lib/fopgs/scripts/libfunction;\
+                                function_iptables;\
+                                function_ssh_addkey;\
+                                function_iptables;\
+                                function_ovpn_connection "sserver";\
+                                function_samba_install;\
+                                function_backup_service" > /var/log/fopgs_smb.log
+                            else
+                                echo -e "${RED}Error: SSH connection failed.${NC}"
+                                exit 1
+                            fi                            
+                            break
+                            ;;
+                        2)
+                            echo -e "${GREEN}Starting install Prometheus and Grafana.${NC}"
+                            # Call the function to install Prometheus and Grafana
+                            function_create_vpnclient mserver
+                            sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                            if function_check_ssh_connection "$SERVER_IP" "$SSH_PORT" "$SSH_KEY" "$SSH_USER" "$PASSWORD"; then
+                                echo -e "${GREEN}SSH connection successful.${NC}"
+                                sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                                sudo sshpassh -p $PASSWORD rsync -avz /usr/lib/fopgs/ $SSH_USER@$SERVER_IP:"/usr/lib/fopgs/"
+                                sudo ssh-keygen -f "/root/.ssh/known_hosts" -R "$SERVER_IP"
+                                sudo sshpass -p $PASSWORD ssh -v $SSH_USER@$SERVER_IP -p $SSH_PORT "\
+                                source /usr/lib/fopgs/scripts/libfunction;\
+                                function_iptables;\
+                                function_ssh_addkey;\
+                                function_iptables;\
+                                function_ovpn_connection "mserver";\
+                                function_prometheus_install;\
+                                function_prometheus_ne_install;\
+                                function_grafana_install;\
+                                function_backup_service" > /var/log/fopgs_prom.log
+                            else
+                                echo -e "${RED}Error: SSH connection failed.${NC}"
+                                exit 1
+                            fi
+                            break
+                            ;;
+                        *)
+                            echo -e "${RED}Invalid choice. Please enter a number between 1 and 2.${NC}"
+                            read -p "Enter your choice [1-2]: " CHOICE_P2
+                    esac                
+
+                    break
+                    ;;
+                *)
+                    echo -e "${RED}Invalid choice. Please enter a number between 1 and 2.${NC}"
+                    read -p "Enter your choice [1-2]: " CHOICE_P2
+                    ;;
+            esac
+            ;;
+        4)
+            echo -e "${GREEN}Creating VPS server(BETA)${NC}"
+            # Call the function to create a client for VPN user
+            read -p "Enter the server name: " NAMESERVER
+            read -p "Enter the public IP(press Enter if you want to create public IP): " PUBLIC_IP
+            read -p "Enter the SSH key with dir(press Enter if you want to create server without ssh key): " SSH_KEY
+            function_vps_install $NAMESERVER $PUBLIC_IP $SSH_KEY
+            break
+            ;;
+        5) 
+            echo -e "${GREEN}Creating client for VPN user.${NC}"
+            # Call the function to create a client for VPN user
+            read -p "Enter the server name: " CLIENTNAME
+            function_create_vpnclient $CLIENTNAME
+            break
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Please enter a number between 1 and 4.${NC}"
+            read -p "Enter your choice [1-4]: " CHOICE
+            ;;
+    esac
+done
+

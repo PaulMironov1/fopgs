@@ -1,0 +1,10 @@
+42c319d919ef9de27d63c5aa20082ad6  usr/bin/fopgs
+2b763519904f6c3851ae3bb07f2ba1a3  usr/lib/fopgs/scripts/backup.service
+3b50026b8632d45e05188a628e59cdc1  usr/lib/fopgs/scripts/backup.sh
+cfc20d93a1ef293da7353d7f83e70c53  usr/lib/fopgs/scripts/backup.timer
+cb7f5e4d8f202b1478b2525f5e99e937  usr/lib/fopgs/scripts/libfunction
+528d31ef9396eb1f5e7c7f27bbfc381d  usr/lib/fopgs/scripts/openssl-easyrsa.cnf
+345738f85d85da730554ceb6ff17c45b  usr/lib/fopgs/scripts/server.conf
+c257a1c23f90e86823e5fe8c223ef528  usr/lib/fopgs/scripts/vars
+63896ce3c95cc8b2dc501ce89bbbec26  usr/share/doc/fopgs/changelog.gz
+e2bbb0c651e4d05a61f749d02346dcc0  usr/share/doc/fopgs/copyright

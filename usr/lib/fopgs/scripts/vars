@@ -1,0 +1,14 @@
+# Easy-RSA 3.x
+set_var EASYRSA_REQ_COUNTRY    "RU"
+set_var EASYRSA_REQ_PROVINCE   "Moscow"
+set_var EASYRSA_REQ_CITY       "Moscow"
+set_var EASYRSA_REQ_ORG        "Home"
+set_var EASYRSA_REQ_EMAIL      "admin@myorg.com"
+set_var EASYRSA_REQ_OU         "homeserver"
+set_var EASYRSA_BATCH          "yes"
+set_var EASYRSA_KEY_SIZE       2048
+set_var EASYRSA_ALGO           rsa
+set_var EASYRSA_CA_EXPIRE      3650
+set_var EASYRSA_CERT_EXPIRE    365
+set_var EASYRSA_CRL_DAYS       180
+set_var EASYRSA_UNIQUE_SUBJECT "no"

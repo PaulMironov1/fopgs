@@ -1,0 +1,9 @@
+[Unit]
+Description=Unit for backup systemfiles
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/fopgs/scripts/backup.sh
+
+[Install]
+WantedBy=multi-user.target

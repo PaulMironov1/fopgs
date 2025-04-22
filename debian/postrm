@@ -1,0 +1,17 @@
+#!/bin/sh
+#Check if the script run as remove or purge
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+	sudo rm -rf /etc/openvpn/
+	sudo rm -rf /etc/samba/
+	sudo rm -rf /var/lib/samba/
+	sudo rm -rf /usr/lib/fopgs
+	sudo apt-get purge samba-common samba-common-bin samba-dsdb-modules samba-libs samba-vfs-modules openvpn -y
+	sudo deluser -help
+	sudo deluser --remove-home serveruser
+	sudo deluser --remove-home user
+	sudo dpkg -r fopgs
+	sudo systemctl disable backup.service
+	sudo systemctl disable backup.timer
+fi
+
+exit 0

@@ -1,0 +1,902 @@
+#=====================FOPGS LIBRARY=========================
+# This script contains functions for setting up a server with various services and configurations.
+#====================IPTABLES RULES=========================
+function_iptables(){
+            iptables -F
+            #Forwarding
+            echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+            if sudo grep -q "^net.ipv4.ip_forward = 1" /etc/sysctl.conf; then
+	            echo "sysctl.conf already changed"
+            else
+	            echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.conf
+            fi
+            sysctl -p 
+            #HTTP, HTTPS, DNS, SMB, SSHF
+            iptables -P INPUT DROP
+            iptables -I INPUT -i lo -j ACCEPT
+            iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+            iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+            iptables -A INPUT -p tcp --dport 443 -j  ACCEPT
+            iptables -A INPUT -p tcp --dport 53 -j  ACCEPT
+            iptables -A INPUT -p tcp --dport 139 -j  ACCEPT
+            iptables -A INPUT -p tcp --dport 445 -j  ACCEPT
+            iptables -A INPUT -p udp --dport 445 -j  ACCEPT
+            iptables -A OUTPUT -p tcp --dport 80 -j ACCEPT
+            iptables -A OUTPUT -p tcp --dport 443 -j  ACCEPT
+            iptables -A OUTPUT -p tcp --dport 53 -j  ACCEPT
+            #Grafana and prometheus
+            iptables -A INPUT -p tcp --dport 3000 -j ACCEPT
+            iptables -A INPUT -p tcp --dport 9000:9999 -j  ACCEPT
+            iptables -A OUTPUT -p tcp --dport 3000 -j ACCEPT
+            iptables -A OUTPUT -p tcp --dport 9000:9999 -j  ACCEPT
+            iptables -A INPUT -i lo -j ACCEPT
+            iptables -A INPUT -p udp --dport 1194 -j ACCEPT
+            iptables -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+            iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+            iptables -t nat -A POSTROUTING -o wlp3s0b1 -j MASQUERADE
+            iptables -A FORWARD -i tun0 -o eth0 -j ACCEPT
+            iptables -A FORWARD -i eth0 -o tun0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+            iptables -A FORWARD -i tun0 -o wlp3s0b1 -j ACCEPT
+            iptables -A FORWARD -i wlp3s0b1 -o tun0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+            #Check netfilter-persistent installed
+            if command -v netfilter-persistent &> /dev/null; then
+                echo "netfilter-persistent is installed. Saving iptables rules..."
+                sudo netfilter-persistent save
+            else
+                echo "netfilter-persistent is not installed. Installing..."
+                sudo apt-get install netfilter-persistent -y
+                sudo netfilter-persistent save
+            fi
+}
+#====================SSH SETUP=========================
+function_sshsetup(){
+            #add system user. Change user password after server install.
+            echo "Adding a system user"
+            #Check if user exists
+            if id "serveruser" &>/dev/null; then
+                echo "User already exist."
+            else
+                echo "Adding system user..."
+                if sudo useradd -m -s /bin/bash serveruser -G "sudo"; then
+                    echo "serveruser:serveruser" | sudo chpasswd
+                    echo -e "User created successfuly.\n"
+                else
+                    echo "Error! User not created"
+                    exit 1
+                fi
+            fi
+            #Generate key and adding to authorized_keys
+            echo "Generate key and adding to authorized_keys"
+            #Check if .ssh dir exist
+            if [ ! -d /home/serveruser/.ssh ]; then
+                sudo mkdir -p /home/serveruser/.ssh
+            fi
+            sudo ssh-keygen -b 4096 -t ed25519 -f /home/serveruser/.ssh/servkey -N ""
+            sudo cp /home/serveruser/.ssh/{servkey,servkey.pub} /usr/lib/fopgs/scripts
+            sudo cat /home/serveruser/.ssh/servkey.pub | sudo tee -a "/root/.ssh/authorized_keys"
+            sudo chown serveruser:serveruser /home/serveruser/.ssh
+            #Check servkey.pub exist
+            if [ ! -f /usr/lib/fopgs/scripts/servkey.pub ]; then
+                echo "Error! servkey.pub not found"
+                exit 1
+            fi
+            #Check if servkey exist
+            if [ ! -f /usr/lib/fopgs/scripts/servkey ]; then
+                echo "Error! servkey not found"
+                exit 1
+            fi
+            #Check if authorized_keys exist
+            if [ ! -f /home/serveruser/.ssh/authorized_keys ]; then
+                sudo touch /home/serveruser/.ssh/authorized_keys
+            fi
+            sudo chmod 700 /home/serveruser/.ssh
+            sudo chmod 600 /home/serveruser/.ssh/authorized_keys
+            #Function for change sshd_conf
+            change_sshd_conf() {
+                local SEARCH="$1"   
+                local REPLACE="$2"  
+                local CONFIG_FILE="/etc/ssh/sshd_config"
+                # Check if the parameter is correctly set
+                if sudo grep -q "^$REPLACE" "$CONFIG_FILE"; then
+                    echo "Parameter already correct: $REPLACE"
+                    return 0
+                fi
+                # Check if the parameter is already set yes
+                local ACTIVE_YES="${REPLACE% *} yes" 
+                if sudo grep -q "^$ACTIVE_YES" "$CONFIG_FILE"; then
+                    sudo sed -i "s/^$ACTIVE_YES/$REPLACE/" "$CONFIG_FILE"
+                    echo "Changed active setting: $ACTIVE_YES → $REPLACE"
+                    return 0
+                fi
+                # Check if the parameter is commented
+                if sudo grep -q "^$SEARCH" "$CONFIG_FILE"; then
+                    sudo sed -i "s/^$SEARCH/$REPLACE/" "$CONFIG_FILE"
+                    echo "Changed commented setting: $SEARCH → $REPLACE"
+                    return 0
+                fi
+                # If the parameter is not found, add it to the end of the file
+                echo "$REPLACE" | sudo tee -a "$CONFIG_FILE" >/dev/null
+                echo "Added new setting: $REPLACE"
+            }
+            #===============Change PasswordAuthentication===========================
+            change_sshd_conf "#PasswordAuthentication yes" "PasswordAuthentication no"
+            #===============Change PermitRootLogin===========================
+            change_sshd_conf "#PermitRootLogin yes" "PermitRootLogin no"
+            #Restart server after setup
+            sudo systemctl restart ssh
+            # Add SSH key to authorized_keys on the remote server
+            sudo cat "$SSH_KEY.pub" | sudo tee -a "/home/serveruser/.ssh/authorized_keys"
+            sudo chown -R serveruser:serveruser /home/serveruser/.ssh
+            sudo chmod -R 700 /home/serveruser/.ssh
+            sudo chmod -R 600 /home/serveruser/.ssh/authorized_keys
+            #Restart server after setup
+            sudo systemctl restart ssh
+}
+#====================OPENVPN SETUP=========================
+function_ovpnisntall(){
+            #Install utilits
+            #sudo apt-get update -y
+            if ! command -v openssl &> /dev/null; then
+                echo "OpenSSL is not installed. Installing...";  sudo apt install openssl -y; fi
+            if sudo apt-get install openvpn -y; then
+                echo "OpenVPN install: OK"; else echo "OpenVPN install: Error" ; exit 1; fi
+            if sudo apt-get install easy-rsa -y; then
+                    echo "Easy-rsa isntall: OK"; else echo "Easy-rsa install: Error" ; exit 1; fi
+
+            #Copy config easy-rsa
+            if [ -d /etc/openvpn/easy-rsa ]; then 
+                echo "Directory is created. Perfoming backup of old certificates"
+                tar -czvf easyrsa_bkp$(date +%-d_%m_%Y).tar.gz; sudo rm -rf /etc/openvpn/easy-rsa; sudo cp -R /usr/share/easy-rsa /etc/openvpn/
+            else
+                echo "Creating easy-rsa directory"; sudo cp -R /usr/share/easy-rsa /etc/openvpn/
+            fi
+            #Creating PKI
+            sudo cp /usr/lib/fopgs/scripts/{vars,openssl-easyrsa.cnf} /etc/openvpn/easy-rsa/
+            sudo cp /usr/lib/fopgs/scripts/server.conf /etc/openvpn
+            cd /etc/openvpn/easy-rsa/
+            if sudo ./easyrsa --batch init-pki; 
+                then echo "init-pki created successfully"
+                else echo "init-pki has not created"; exit 1
+            fi
+            #Building CA
+            if sudo ./easyrsa --batch build-ca nopass ; then
+                    echo "build-ca created successfully";
+            else echo "build-ca has not created"; exit 1
+            fi
+            #Generating dh key
+            if sudo ./easyrsa gen-dh server nopass; then 
+                echo "gen-dh created successfully"
+                else echo "gen-dh has not created"; exit 1
+            fi
+            #Generating certs
+            if sudo ./easyrsa --batch build-server-full server nopass ; then
+                    echo "All crts and keys created successfully"; 
+                    else echo "Certifactes created, but not signing. Restart sign"; sudo ./easyrsa sign-req server server
+            fi
+            sudo rm -rf ./chk.tmp
+            #Generating ta.key
+            if sudo openvpn --genkey --secret /etc/openvpn/easy-rsa/pki/ta.key; then 
+                echo "ta.key created successfully"
+                else echo "ta.key has not created"; exit 1
+            fi
+            #Copying certificates to openvpn directory
+            sudo cp /etc/openvpn/easy-rsa/pki/ca.crt /etc/openvpn/
+            sudo cp /etc/openvpn/easy-rsa/pki/private/server.key /etc/openvpn/
+            sudo cp /etc/openvpn/easy-rsa/pki/ta.key /etc/openvpn/
+            sudo cp /etc/openvpn/easy-rsa/pki/dh.pem /etc/openvpn/
+            sudo cp /etc/openvpn/easy-rsa/pki/issued/server.crt /etc/openvpn 
+            #Restarting openvpn server
+            sudo systemctl start openvpn@server
+            sudo systemctl enable openvpn@server
+}
+#====================OVPN Connection=========================
+function_ovpn_connection(){
+            DIR_SCRIPTS="/etc/openvpn"
+            #Check configure
+            CONFIGURE=$1
+            #Check if directory exist
+            if [ ! -d $DIR_SCRIPTS ]; then
+                echo "Directory $DIR_SCRIPTS does not exist. Creating..."
+                sudo apt-get update
+                sudo apt-get install openvpn -y
+            fi
+
+            #Creating script vpn connection
+            if [ "$CONFIGURE" = "mserver" ]; then
+            cat <<EOF > $DIR_SCRIPTS/ovpn_connect.sh
+#!/bin/bash
+# Check if OpenVPN is already running
+if pgrep -x "openvpn" >/dev/null; then
+    echo "OpenVPN is already running. Stopping connection for new connection"
+    sudo kill -9 \$(pgrep -x "openvpn")
+fi
+sudo openvpn --config /usr/lib/fopgs/scripts/mserver.ovpn --daemon
+EOF
+            elif [ "$CONFIGURE" = "sserver" ]; then
+            cat <<EOF > $DIR_SCRIPTS/ovpn_connect.sh
+#!/bin/bash
+# Check if OpenVPN is already running
+if pgrep -x "openvpn" >/dev/null; then
+    echo "OpenVPN is already running. Stopping connection for new connection"
+    sudo kill -9 \$(pgrep -x "openvpn")
+fi
+sudo openvpn --config /usr/lib/fopgs/scripts/sserver.ovpn --daemon
+EOF
+            else
+            echo "Error! Config file not found"
+            exit 1
+            fi
+
+            sudo chmod +x $DIR_SCRIPTS/ovpn_connect.sh
+
+            #Creating and start daemon ovpn connection
+sudo cat <<EOF > /etc/systemd/system/ovpn_connection.service
+[Unit]
+Description=OpenVPN Automatic Connection
+[Service]
+Type=forking
+ExecStart=$DIR_SCRIPTS/ovpn_connect.sh
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+
+            #Enabled service
+            sudo systemctl daemon-reload
+            sudo systemctl enable ovpn_connection.service
+            sudo systemctl start ovpn_connection.service
+}
+#=======================GRAFANA SETUP=========================
+# This script installs Grafana and configures it to use Prometheus as a data source.
+# It also creates a sample dashboard with panels for Node Load, Memory Usage, and Disk Usage.
+# It uses curl to send requests to the Grafana API for creating the data source and dashboard.
+function_grafana_install() {
+            echo "Installing grafana..."
+            sudo apt-get install -y adduser libfontconfig1 musl
+            wget https://dl.grafana.com/oss/release/grafana_11.6.0_amd64.deb
+            sudo dpkg -i grafana_11.6.0_amd64.deb
+            sudo systemctl enable grafana-server
+            sudo systemctl start grafana-server
+            #Wait for grafana to start
+            sleep 20
+            #Request to create data
+            #Create Prometheus data source
+            curl -X POST "http://localhost:3000/api/datasources" \
+                -u admin:admin \
+                -H "Content-Type: application/json" \
+                --data '{
+                  "name":"Prometheus",
+                  "type":"prometheus",
+                  "url":"http://localhost:9090",
+                  "access":"proxy",
+                  "basicAuth":false
+                }'
+            #Create Grafana dashboard
+            curl -X POST "http://localhost:3000/api/dashboards/import" \
+              -u admin:admin \
+              -H "Content-Type: application/json" \
+              --data '{
+                "dashboard": {
+                  "id": null,
+                  "uid": "system-monitoring",
+                  "title": "System Monitoring Dashboard",
+                  "timezone": "browser",
+                  "schemaVersion": 26,
+                  "version": 0,
+                  "refresh": "30s",
+                  "panels": [
+                    {
+                      "id": 1,
+                      "title": "System Alerts",
+                      "type": "alertlist",
+                      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 0},
+                      "options": {
+                        "onlyAlertsOnDashboard": false,
+                        "show": "current",
+                        "sortOrder": 1,
+                        "stateFilter": ["alerting"],
+                        "dashboardFilter": ""
+                      }
+                    },
+                    {
+                      "id": 2,
+                      "title": "CPU Load Average (1m)",
+                      "type": "graph",
+                      "datasource": "Prometheus",
+                      "targets": [
+                        {
+                          "expr": "node_load1{instance=~\"localhost:9100|10.8.0.1:9100\"}",
+                          "legendFormat": "{{instance}}",
+                          "refId": "A"
+                        }
+                      ],
+                      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+                      "options": {
+                        "legend": {"displayMode": "list", "placement": "bottom"},
+                        "tooltip": {"mode": "single"}
+                      }
+                    },
+                    {
+                      "id": 3,
+                      "title": "Memory Usage",
+                      "type": "gauge",
+                      "datasource": "Prometheus",
+                      "targets": [
+                        {
+                          "expr": "100 - (node_memory_MemAvailable_bytes{instance=~\"localhost:9100|10.8.0.1:9100\"} / node_memory_MemTotal_bytes{instance=~\"localhost:9100|10.8.0.1:9100\"}) * 100",
+                          "legendFormat": "{{instance}}",
+                          "refId": "A"
+                        }
+                      ],
+                      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+                      "options": {
+                        "showThresholdLabels": true,
+                        "showThresholdMarkers": true,
+                        "min": 0,
+                        "max": 100,
+                        "orientation": "auto",
+                        "reduceOptions": {
+                          "calcs": ["lastNotNull"],
+                          "fields": "",
+                          "values": false
+                        },
+                        "text": {},
+                        "unit": "percent"
+                      }
+                    },
+                    {
+                      "id": 4,
+                      "title": "Disk Usage",
+                      "type": "gauge",
+                      "datasource": "Prometheus",
+                      "targets": [
+                        {
+                          "expr": "100 - (node_filesystem_avail_bytes{instance=~\"localhost:9100|10.8.0.1:9100\",mountpoint=\"/\"} / node_filesystem_size_bytes{instance=~\"localhost:9100|10.8.0.1:9100\",mountpoint=\"/\"}) * 100",
+                          "legendFormat": "{{instance}}",
+                          "refId": "A"
+                        }
+                      ],
+                      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+                      "options": {
+                        "showThresholdLabels": true,
+                        "showThresholdMarkers": true,
+                        "min": 0,
+                        "max": 100,
+                        "orientation": "auto",
+                        "reduceOptions": {
+                          "calcs": ["lastNotNull"],
+                          "fields": "",
+                          "values": false
+                        },
+                        "text": {},
+                        "unit": "percent"
+                      }
+                    }
+                  ]
+                },
+                "folderId": 0,
+                "overwrite": true
+              }'
+
+            # Create alerts
+            sleep 5
+            # Alert for system inactivity > 15 minutes
+            curl -X POST "http://localhost:3000/api/v1/provisioning/alert-rules" \
+              -u admin:admin \
+              -H "Content-Type: application/json" \
+              --data '{
+                "name": "SystemInactiveAlert",
+                "condition": "avg(up{instance=~\"localhost:9100|10.8.0.1:9100\"}) == 0",
+                "for": "15m",
+                "annotations": {
+                  "summary": "System inactive for more than 15 minutes",
+                  "description": "System {{ $labels.instance }} has been unresponsive for 15 minutes"
+                },
+                "labels": {
+                  "severity": "critical"
+                }
+              }'
+
+            # Alert for no disk activity > 30 minutes
+            curl -X POST "http://localhost:3000/api/v1/provisioning/alert-rules" \
+              -u admin:admin \
+              -H "Content-Type: application/json" \
+              --data '{
+                "name": "NoDiskActivityAlert",
+                "condition": "rate(node_disk_read_bytes_total{instance=~\"localhost:9100|10.8.0.1:9100\"}[30m]) == 0 and rate(node_disk_written_bytes_total{instance=~\"localhost:9100|10.8.0.1:9100\"}[30m]) == 0",
+                "for": "30m",
+                "annotations": {
+                  "summary": "No disk activity for more than 30 minutes",
+                  "description": "System {{ $labels.instance }} has no disk activity for 30 minutes"
+                },
+                "labels": {
+                  "severity": "warning"
+                }
+              }'
+
+            # Alert for high memory usage > 90%
+            curl -X POST "http://localhost:3000/api/v1/provisioning/alert-rules" \
+              -u admin:admin \
+              -H "Content-Type: application/json" \
+              --data '{
+                "name": "HighMemoryUsageAlert",
+                "condition": "100 - (node_memory_MemAvailable_bytes{instance=~\"localhost:9100|10.8.0.1:9100\"} / node_memory_MemTotal_bytes{instance=~\"localhost:9100|10.8.0.1:9100\"}) * 100 > 90",
+                "for": "5m",
+                "annotations": {
+                  "summary": "High memory usage (>90%)",
+                  "description": "System {{ $labels.instance }} memory usage is at {{ $value }}%"
+                },
+                "labels": {
+                  "severity": "warning"
+                }
+              }'
+
+            # Alert for high disk usage > 90%
+            curl -X POST "http://localhost:3000/api/v1/provisioning/alert-rules" \
+              -u admin:admin \
+              -H "Content-Type: application/json" \
+              --data '{
+                "name": "HighDiskUsageAlert",
+                "condition": "100 - (node_filesystem_avail_bytes{instance=~\"localhost:9100|10.8.0.1:9100\",mountpoint=\"/\"} / node_filesystem_size_bytes{instance=~\"localhost:9100|10.8.0.1:9100\",mountpoint=\"/\"}) * 100 > 90",
+                "for": "5m",
+                "annotations": {
+                  "summary": "High disk usage (>90%)",
+                  "description": "System {{ $labels.instance }} disk usage is at {{ $value }}%"
+                },
+                "labels": {
+                  "severity": "warning"
+                }
+              }'
+
+            # Alert for server down
+            curl -X POST "http://localhost:3000/api/v1/provisioning/alert-rules" \
+              -u admin:admin \
+              -H "Content-Type: application/json" \
+              --data '{
+                "name": "ServerDownAlert",
+                "condition": "up{instance=~\"localhost:9100|10.8.0.1:9100\"} == 0",
+                "for": "1m",
+                "annotations": {
+                  "summary": "Server is down",
+                  "description": "Server {{ $labels.instance }} is not responding"
+                },
+                "labels": {
+                  "severity": "critical"
+                }
+              }'
+            
+}
+#====================PROMETHEUS SETUP=========================
+function_prometheus_install() {
+            echo "Installing prometheus..."
+            wget https://github.com/prometheus/prometheus/releases/download/v3.2.1/prometheus-3.2.1.linux-amd64.tar.gz -O prometheus.tar.gz
+            tar xvfz prometheus.tar.gz
+            sudo mkdir /etc/prometheus
+            sudo mkdir /var/lib/prometheus
+            sudo mv "prometheus-3.2.1.linux-amd64"/{prometheus,promtool} /usr/local/bin
+            sudo mv "prometheus-3.2.1.linux-amd64"/{consoles, console_libraries} /etc/prometheus
+            useradd -rs /bin/false prometheus
+
+cat <<EOF > /etc/prometheus/prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "nodes" 
+    static_configs:
+      - targets: ['localhost:9100']
+        labels:
+          instanse: 'monitoring'
+      - targets: ['10.8.0.1:9100']
+        labels:
+          instanse: 'gateway'
+EOF
+cat <<EOF > /etc/systemd/system/prometheus.service
+[Unit]
+Description=Prometheus
+After=network.target
+[Service]
+User=prometheus
+Group=prometheus
+Type=simple
+ExecStart=/usr/local/bin/prometheus \
+    --config.file /etc/prometheus/prometheus.yml \
+    --storage.tsdb.path /var/lib/prometheus/ \
+    --web.console.templates=/etc/prometheus/consoles \
+    --web.console.libraries=/etc/prometheus/console_libraries
+[Install]
+WantedBy=multi-user.target
+EOF
+
+            chown -R prometheus:prometheus /etc/prometheus
+            chown -R prometheus:prometheus /var/lib/prometheus
+            systemctl daemon-reload
+            systemctl enable node_exporter
+            systemctl enable prometheus
+}
+#====================PROMETHEUS NODE EXPORTER=========================
+function_prometheus_ne_install() {
+            wget https://github.com/prometheus/node_exporter/releases/download/v1.9.0/node_exporter-1.9.0.linux-amd64.tar.gz -O node-exporter.tar.gz
+            tar xvfz node-exporter.tar.gz
+            mv node_exporter-1.9.0.linux-amd64/node_exporter /usr/local/bin
+            useradd -rs /bin/false node_exporter
+
+            #Creating units
+cat << EOF > /etc/systemd/system/node_exporter.service
+[Unit]
+Description=Node Exporter
+After=network.target
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+ExecStart=/usr/local/bin/node_exporter
+[Install]
+WantedBy=multi-user.target
+EOF
+
+            systemctl daemon-reload
+            systemctl start node_exporter
+            systemctl start prometheus
+}
+
+function_backup_service() {
+#====================BACKUP SERVICE=========================
+            sudo cp /usr/lib/fopgs/scripts/{backup.service,backup.timer} /etc/systemd/system
+			sudo systemctl daemon-reload
+			sudo systemctl enable backup.service
+			sudo systemctl enable backup.timer
+			sudo systemctl start backup.service
+}
+#====================SAMBA SETUP=========================
+function_samba_install() {
+# Check for root privileges
+            # Configuration parameters
+            SHARE_USER="user"
+            SHARE_PASSWORD="user"
+            SHARE_NAME="public"
+            SHARE_PATH="/mnt/smbdata/public"
+
+            # Install Samba
+            echo "Installing Samba..."
+            sudo apt-get update
+            sudo apt-get install samba -y
+
+            # Backup configuration
+            echo "Creating configuration backup..."
+            if [ ! -d /etc/samba ]; then
+                echo "Directory /etc/samba does not exist. Creating..."
+                sudo mkdir /etc/samba
+            fi
+            cp /etc/samba/smb.conf /etc/samba/smb.conf.bak
+
+            # Configure Samba
+echo "Configuring smb.conf..."
+cat <<EOF > /etc/samba/smb.conf
+[global]
+workgroup = WORKGROUP
+server string = Samba Server
+security = user
+map to guest = bad user
+dns proxy = no
+[$SHARE_NAME]
+path = $SHARE_PATH
+browsable = yes
+writable = yes
+guest ok = yes
+read only = no
+create mask = 0777
+directory mask = 0777
+EOF
+
+            # Create shared directory
+            echo "Creating shared directory..."
+            mkdir -p $SHARE_PATH
+            chmod -R 777 $SHARE_PATH
+
+            # Create system user
+            echo "Creating Samba user..."
+            useradd --no-create-home --shell /usr/sbin/nologin $SHARE_USER
+
+            # Set Samba user password
+            (echo "$SHARE_PASSWORD"; echo "$SHARE_PASSWORD") | smbpasswd -a -s $SHARE_USER
+
+            # Restart Samba services
+            echo "Restarting Samba services..."
+            systemctl restart smbd
+            systemctl enable smbd
+
+            # Verify configuration
+            testparm -s
+
+            # Output summary
+            echo " "
+            echo "Setup completed successfully!"
+            echo "============================"
+            echo "Shared directory: $SHARE_PATH"
+            echo "Share name: $SHARE_NAME"
+            echo "Connection credentials:"
+            echo "Username: $SHARE_USER"
+            echo "Password: $SHARE_PASSWORD"
+            echo " "
+            echo "Example connection from another computer:"
+            echo "smb://ip-address/$SHARE_NAME"
+            echo "Pleasem change the password for the user $SHARE_USER after setup"
+}
+#====================VPS CREATING==========================
+function_vps_install() {
+            #Variables servers installing
+            SERVERNAME=$1
+            PUB_IP=$2
+            SSH_KEY=$3
+            echo "This function is in BETA status, and it may not work correctly."
+            echo "Please check the script before using it."
+            echo "Creating VPS..."
+            # Check if the script is run as root
+           if command -v twc &> /dev/null; then
+                echo "twc is installed. Proceeding with VPS creation..."
+            else
+                echo "twc not installed. Installing twc..."
+                sudo apt-get update
+                sudo apt-get install python -y
+                if pip install twc-cli ; then
+                    echo "twc installed successfully."
+                    echo "Configure twc, prepare your token"
+                    twc config
+                else
+                    echo "twc installation failed. Exiting..."
+                    exit 1
+                fi
+            fi
+            echo -e "Create server:\n
+            \r1. Create server with ssh key;
+            \r2. Create server without ssh key."
+            read -p "Select option (1 or 2): " OPTION
+            case $OPTION in
+                1)
+                    echo "Creating server with SSH key..."
+                    if [ -z "$SSH_KEY" ]; then
+                        #If variable $PUB_IP get data $SSH_KEY
+                        SSH_KEY=$PUB_IP
+                        PUB_IP=""
+                        if [ -z "$SSH_KEY" ]; then
+                        echo "Please provide a SSH key."
+                        exit 1
+                        elif [ ! -f "$SSH_KEY" ]; then
+                            echo "SSH key file not found. Please provide a valid SSH key file."
+                            exit 1
+                        else
+                            echo "SSH key file found. Proceeding..."
+                        fi
+                    fi
+                    if [ -z "$SERVERNAME" ]; then
+                        echo "Please provide a server name."
+                        exit 1
+                    fi
+                    if [ -z "$PUB_IP" ]; then
+                        echo "Create server with new public IP"
+                        twc server create --name $SERVERNAME --image ubuntu-24.04 --preset-id 2447 --ssh-key $SSH_KEY
+                    else
+                        echo "Create server with public IP $PUB_IP"
+                        twc server create --name $SERVERNAME --image ubuntu-24.04 --preset-id 2447 --public-ip $PUB_IP --ssh-key $SSH_KEY
+                    fi
+                    ;;
+                2)
+                    echo "Creating server without SSH key..."
+                    if [ -z "$SERVERNAME" ]; then
+                        echo "Please provide a server name."
+                        exit 1
+                    fi
+                    if [ -z "$PUB_IP" ]; then
+                    echo "Create server with new public IP"
+                        twc server create --name $NAMESERVER --image ubuntu-24.04 --preset-id 2447
+                    else
+                        echo "Create server with public IP $PUB_IP"
+                        twc server create --name $SERVERNAME --image ubuntu-24.04 --preset-id 2447 --public-ip $PUB_IP
+                    fi
+                    ;;
+                *)
+                    echo "Invalid option. Exiting..."
+                    ;;
+            esac
+}
+function_check_ssh_connection() {
+            # Check if SSH connection is available
+            local SSH_KEY=$3
+            local USER=$4
+            local PASS=$5
+            local SSH_PORT=$2
+            local SERVER_IP=$1
+            if [ ! -z "$PASS" ]; then
+                echo "SSH key is not provided. Using password authentication."
+                if sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$SSH_PORT" "$USER@$SERVER_IP" "exit" 2>/dev/null; then
+                    echo "SSH connection is available."
+                    PASS=""
+                else
+                    echo "SSH connection is not available."
+                    exit 1
+                fi
+            else
+                echo "SSH key is provided. Using key authentication."
+                if ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$SSH_PORT" "$USER@$SERVER_IP" "exit" 2>/dev/null; then
+                    echo "SSH connection is available."
+                else
+                    echo "SSH connection is not available."
+                    exit 1
+                fi
+            fi
+}
+function_ssh_addkey() {
+            # Check if SSH key is provided
+            local SSH_KEY=/usr/lib/fopgs/scripts/servkey
+            if id "serveruser" &>/dev/null; then
+                echo "User already exist."
+            else
+                echo "Adding system user..."
+                if sudo useradd -m -s /bin/bash serveruser -G "sudo"; then
+                    echo "serveruser:serveruser" | sudo chpasswd
+                    echo -e "User created successfuly.\n"
+                else
+                    echo "Error! User not created"
+                    exit 1
+                fi
+            fi
+            if [ ! -d /home/serveruser/.ssh ]; then
+                sudo mkdir -p /home/serveruser/.ssh
+            fi
+            if [ ! -f "$SSH_KEY.pub" ]; then
+                echo "Error! servkey.pub not found"
+                exit 1
+            fi
+            change_sshd_conf() {
+                local SEARCH="$1"   
+                local REPLACE="$2"  
+                local CONFIG_FILE="/etc/ssh/sshd_config"
+                # Check if the parameter is correctly set
+                if sudo grep -q "^$REPLACE" "$CONFIG_FILE"; then
+                    echo "Parameter already correct: $REPLACE"
+                    return 0
+                fi
+                # Check if the parameter is already set yes
+                local ACTIVE_YES="${REPLACE% *} yes" 
+                if sudo grep -q "^$ACTIVE_YES" "$CONFIG_FILE"; then
+                    sudo sed -i "s/^$ACTIVE_YES/$REPLACE/" "$CONFIG_FILE"
+                    echo "Changed active setting: $ACTIVE_YES → $REPLACE"
+                    return 0
+                fi
+                # Check if the parameter is commented
+                if sudo grep -q "^$SEARCH" "$CONFIG_FILE"; then
+                    sudo sed -i "s/^$SEARCH/$REPLACE/" "$CONFIG_FILE"
+                    echo "Changed commented setting: $SEARCH → $REPLACE"
+                    return 0
+                fi
+                # If the parameter is not found, add it to the end of the file
+                echo "$REPLACE" | sudo tee -a "$CONFIG_FILE" >/dev/null
+                echo "Added new setting: $REPLACE"
+            }
+            #===============Change PasswordAuthentication===========================
+            change_sshd_conf "#PasswordAuthentication yes" "PasswordAuthentication no" 
+            #===============Change PermitRootLogin===========================
+            change_sshd_conf "#PermitRootLogin yes" "PermitRootLogin no"
+            #Restart server after setup
+            sudo rm -rf "/etc/ssh/ssh_config.d/*"
+            sudo systemctl restart ssh
+            # Add SSH key to authorized_keys on the remote server
+            sudo cat "$SSH_KEY.pub" | sudo tee -a "/home/serveruser/.ssh/authorized_keys"
+            sudo chown -R serveruser:serveruser /home/serveruser/.ssh
+            sudo chmod -R 700 /home/serveruser/.ssh
+            sudo chmod -R 600 /home/serveruser/.ssh/authorized_keys
+            #Check servkey.pub exist
+
+}
+function_create_vpnclient() {
+CLIENT_NAME="$1"
+OUTPUT_FILE="/usr/lib/fopgs/scripts/${CLIENT_NAME}.ovpn"
+#Check if client name is provided
+            if [ -z "$CLIENT_NAME" ]; then
+                echo "Please provide a client name."
+                exit 1
+            fi
+            #Check if directory exist
+            if [ -f "$OUTPUT_FILE" ]; then
+                echo "Client VPN config already exist. Please remove it before creating a new one."
+                read -p "Do you want to remove it? (y/n): " ANSWER
+                if [[ "$ANSWER" == "y" || "$ANSWER" == "Y" ]]; then
+                    sudo rm -rf "$OUTPUT_FILE"
+                    echo "Client config removed."
+                else
+                    echo "Client config not removed. Exiting..."
+                    exit 1
+                fi
+            fi
+            #Change chown and permissions
+            sudo chown $(whoami):$(whoami) -R /etc/openvpn/clients 
+            sudo chmod -R 755 /etc/openvpn/clients
+            sudo mkdir /etc/openvpn/clients
+            cd /etc/openvpn/easy-rsa
+            #Backup vars file
+            sudo cp -r /etc/openvpn/easy-rsa/vars /etc/openvpn/easy-rsa/vars.bkp
+            sudo rm -rf /etc/openvpn/easy-rsa/vars
+            #Create new vars file
+            sudo cat <<EOF >  /etc/openvpn/easy-rsa/vars
+            # Easy-RSA 3.x
+            set_var EASYRSA_REQ_COUNTRY    "RU"
+            set_var EASYRSA_REQ_PROVINCE   "Moscow"
+            set_var EASYRSA_REQ_CITY       "Moscow"
+            set_var EASYRSA_REQ_ORG        "Home"
+            set_var EASYRSA_REQ_EMAIL      "admin@myorg.com"
+            set_var EASYRSA_REQ_OU         "homeserver"
+            set_var EASYRSA_BATCH          "yes"
+            set_var EASYRSA_KEY_SIZE       2048
+            set_var EASYRSA_ALGO           rsa
+            set_var EASYRSA_CA_EXPIRE      3650
+            set_var EASYRSA_CERT_EXPIRE    365
+            set_var EASYRSA_CRL_DAYS       180
+            set_var EASYRSA_UNIQUE_SUBJECT "no"
+            set_var EASYRSA_REQ_CN         "$CLIENT_NAME"
+EOF
+#Generate client certificate
+sudo ./easyrsa gen-req "$CLIENT_NAME" nopass
+sudo ./easyrsa sign-req client "$CLIENT_NAME"
+sudo cp /etc/openvpn/easy-rsa/pki/private/$CLIENT_NAME.key /etc/openvpn/clients/$CLIENT_NAME.key
+sudo cp /etc/openvpn/easy-rsa/pki/issued/$CLIENT_NAME.crt /etc/openvpn/clients/$CLIENT_NAME.crt
+CA_CERT="/etc/openvpn/ca.crt"
+CLIENT_CERT="/etc/openvpn/clients/${CLIENT_NAME}.crt"
+CLIENT_KEY="/etc/openvpn/clients/${CLIENT_NAME}.key"
+TA_KEY="/etc/openvpn/ta.key"
+SERVERIP="$(dig +short myip.opendns.com @resolver1.opendns.com)"
+SERVER_PORT="1194"
+PROTOCOL="udp"
+CIPHER="AES-256-CBC"
+AUTH="SHA256"
+#Assamble client config
+sudo cat <<EOF > ${OUTPUT_FILE}
+client
+dev tun
+proto ${PROTOCOL}
+remote ${SERVERIP} ${SERVER_PORT}
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+cipher ${CIPHER}
+auth ${AUTH}
+verb 3
+<ca>
+$(sudo cat ${CA_CERT})
+</ca>
+<cert>
+$(sudo cat ${CLIENT_CERT})
+</cert>
+<key>
+$(sudo cat ${CLIENT_KEY})
+</key>
+<tls-crypt>
+$(sudo cat ${TA_KEY})
+</tls-crypt>
+key-direction 1
+EOF
+            if [ -f "${OUTPUT_FILE}" ]; then
+                echo "Client config created successfully: ${OUTPUT_FILE}"
+            else
+                echo "Error creating client config: ${OUTPUT_FILE}"
+                exit 1
+            fi
+            sudo chmod 600 ${OUTPUT_FILE}
+            #Copy client config to /usr/lib/fopgs/scripts
+            sudo cp ${OUTPUT_FILE} /usr/lib/fopgs/scripts/${CLIENT_NAME}.ovpn
+            if [ -f "/usr/lib/fopgs/scripts/${CLIENT_NAME}.ovpn" ]; then
+                echo "Client config copied successfully: /usr/lib/fopgs/scripts/${CLIENT_NAME}.ovpn"
+                sudo chmod 655 /usr/lib/fopgs/scripts/${CLIENT_NAME}.ovpn
+            else
+                echo "Error copying client config: /usr/lib/fopgs/scripts/${CLIENT_NAME}.ovpn"
+                exit 1
+            fi
+            #Restore vars file
+            sudo rm -rf /etc/openvpn/easy-rsa/vars
+            sudo mv /etc/openvpn/easy-rsa/vars.bkp /etc/openvpn/easy-rsa/vars
+
+}
